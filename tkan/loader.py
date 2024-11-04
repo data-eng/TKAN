@@ -8,7 +8,7 @@ import glob
 import mne
 
 from collections import Counter
-from utils import get_path, robust_normalize, save_json
+from .utils import get_path, robust_normalize, save_json
 
 
 def get_boas_data(base_path, output_path):
@@ -39,17 +39,33 @@ def get_boas_data(base_path, output_path):
         try:
             raw = mne.io.read_raw_edf(eeg_file_pattern, preload=True)
             x_data = raw.to_data_frame()
+
+            print(f'x_data shape for {subject_id}: {x_data.shape}')
+            print(f'x_data sample:\n{x_data.head()}')
+
         except Exception as e:
             print(f'Error loading EEG data for {subject_id}: {e}')
             continue
 
         try:
             y_data = pd.read_csv(events_file_pattern, delimiter='\t')
+
+            print(f'y_data shape for {subject_id}: {y_data.shape}')
+            print(f'y_data sample:\n{y_data.head()}')
+
         except Exception as e:
             print(f'Error loading events data for {subject_id}: {e}')
             continue
 
-        combined_data = pd.concat([x_data, y_data], axis=1)
+        y_expanded = pd.DataFrame(index=x_data.index, columns=y_data.columns)
+
+        for _, row in y_data.iterrows():
+            begsample = row['begsample'] - 1
+            endsample = row['endsample'] - 1
+
+            y_expanded.loc[begsample:endsample] = row.values
+
+        combined_data = pd.concat([x_data, y_expanded], axis=1)
 
         combined_data.to_csv(output_file, index=False)
         print(f'Saved combined data for {subject_id} to {output_file}')
@@ -58,7 +74,7 @@ def get_boas_data(base_path, output_path):
 class TSDataset(Dataset):
     def __init__(self, df, seq_len, X, t, y, per_epoch=True):
         """
-        Initializes a time series dataset. It creates sequences from the input data by 
+        Initializes a time series dataset. It creates sequences from the input data by
         concatenating features and time columns. The target variable is stored separately.
 
         :param df: Pandas dataframe containing the data.
@@ -103,16 +119,16 @@ class TSDataset(Dataset):
         X, y = torch.FloatTensor(X), torch.LongTensor(y)
 
         return X, y
-    
+
     @property
     def num_samples(self):
         """
         Returns the total number of samples in the dataset.
-        
+
         :return: Total number of samples.
         """
         return self.X.shape[0]
-    
+
     @property
     def num_epochs(self):
         """
@@ -130,7 +146,7 @@ class TSDataset(Dataset):
         :return: Maximum index for a sequence.
         """
         return self.num_samples - self.seq_len
-    
+
     @property
     def num_seqs(self):
         """
@@ -178,7 +194,7 @@ def load_file(path):
 
     return X, t, y
 
-def combine_data(paths, seq_len=240):
+def combine_data(paths, seq_len=240, normalize=False):
     """
     Combine data from multiple CSV files into a dataframe, processing sequences and removing invalid rows.
 
@@ -219,11 +235,12 @@ def combine_data(paths, seq_len=240):
     assert not df.isna().any().any(), 'NaN values found in the dataframe!'
 
     stats_path = get_path('..', '..', 'data', filename='stats.json')
-    df = robust_normalize(df, exclude=['night', 'seq_id', 'time', 'majority'], path=stats_path)
+    if normalize:
+        df = robust_normalize(df, exclude=['night', 'seq_id', 'time', 'majority'], path=stats_path)
 
     return df
 
-def get_dataframes(paths, seq_len=240, exist=False):
+def get_dataframes(paths, seq_len, exist):
     """
     Create or load dataframes for training, and testing.
 
@@ -336,6 +353,7 @@ def create_dfs(dataframes):
     print('Creating datasets from dataframes.')
 
     for df in dataframes:
+        df = df.drop(columns=['time'])
         df = df.groupby(['seq_id', 'night']).agg(list).reset_index()
         df['majority_class'] = df['majority'].apply(most_common)
 
