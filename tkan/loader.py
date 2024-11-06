@@ -1,11 +1,9 @@
-import torch
-import multiprocessing
 import pandas as pd
 import numpy as np
-from torch.utils.data import Dataset, DataLoader
 import os
 import glob
 import mne
+import ast
 
 from collections import Counter
 from .utils import get_path, robust_normalize, save_json
@@ -71,95 +69,6 @@ def get_boas_data(base_path, output_path):
         print(f'Saved combined data for {subject_id} to {output_file}')
 
 
-class TSDataset(Dataset):
-    def __init__(self, df, seq_len, X, t, y, per_epoch=True):
-        """
-        Initializes a time series dataset. It creates sequences from the input data by
-        concatenating features and time columns. The target variable is stored separately.
-
-        :param df: Pandas dataframe containing the data.
-        :param seq_len: Length of the input sequence (number of time steps).
-        :param X: List of feature columns.
-        :param t: List of time-related columns.
-        :param y: List of target columns.
-        :param per_epoch: Whether to create sequences in non-overlapping (True) or overlapping (False) epochs.
-        """
-        self.seq_len = seq_len
-        self.X = pd.concat([df[X], df[t]], axis=1)
-        self.y = df[y]
-        self.per_epoch = per_epoch
-
-        print(f'Initializing dataset with: samples={self.num_samples}, samples/seq={seq_len}, seqs={self.num_seqs}, epochs={self.num_epochs} ')
-
-    def __len__(self):
-        """
-        Returns the number of sequences in the dataset.
-
-        :return: Length of the dataset.
-        """
-        return self.num_seqs
-
-    def __getitem__(self, idx):
-        """
-        Retrieves a sample from the dataset at the specified index.
-
-        :param idx: Index of the sample.
-        :return: Tuple of features and target tensors.
-        """
-        if self.per_epoch:
-            start_idx = idx * self.seq_len
-        else:
-            start_idx = idx
-
-        end_idx = start_idx + self.seq_len
-
-        X = self.X.iloc[start_idx:end_idx].values
-        y = self.y.iloc[start_idx:end_idx].values
-
-        X, y = torch.FloatTensor(X), torch.LongTensor(y)
-
-        return X, y
-
-    @property
-    def num_samples(self):
-        """
-        Returns the total number of samples in the dataset.
-
-        :return: Total number of samples.
-        """
-        return self.X.shape[0]
-
-    @property
-    def num_epochs(self):
-        """
-        Returns the number of full epochs available based on the dataset size.
-
-        :return: Number of epochs.
-        """
-        return self.num_samples // 7680
-
-    @property
-    def max_seq_id(self):
-        """
-        Returns the maximum index for a sequence.
-
-        :return: Maximum index for a sequence.
-        """
-        return self.num_samples - self.seq_len
-
-    @property
-    def num_seqs(self):
-        """
-        Returns the number of sequences that can be created from the dataset.
-
-        :return: Number of sequences.
-        """
-        if self.per_epoch:
-            return self.num_samples // self.seq_len
-        else:
-            return self.max_seq_id + 1
-
-
 def split_data(dir, train_size=57, test_size=1):
     """
     Split the CSV files into training, and test sets.
@@ -179,10 +88,10 @@ def split_data(dir, train_size=57, test_size=1):
 
     return (train_paths, test_paths)
 
+
 def load_file(path):
     """
     Load data from a CSV file.
-
     :param path: Path to the CSV file.
     :return: Tuple (X, t, y) where X contains EEG features, t contains time, and y contains labels.
     """
@@ -193,6 +102,7 @@ def load_file(path):
     y = df['majority'].values
 
     return X, t, y
+
 
 def combine_data(paths, seq_len=240, normalize=False):
     """
@@ -208,11 +118,10 @@ def combine_data(paths, seq_len=240, normalize=False):
     print(f'Combining data from {len(paths)} files.')
 
     for path in paths:
-        X, t, y = load_file(path)
+        X, _, y = load_file(path)
 
         df = pd.DataFrame(X, columns=['HB_1', 'HB_2'])
         df['majority'] = y
-        df['time'] = t
 
         df['seq_id'] = (np.arange(len(df)) // seq_len) + 1
         df['night'] = int(os.path.basename(path).split('-')[1].split('.')[0])
@@ -240,45 +149,54 @@ def combine_data(paths, seq_len=240, normalize=False):
 
     return df
 
-def get_dataframes(paths, seq_len, exist):
+
+def get_dataframe(path, seq_len, name, exist):
     """
     Create or load dataframes for training, and testing.
 
-    :param paths: List of file paths for training, and testing.
+    :param path: File path for training, and testing.
     :param exist: Boolean flag indicating if the dataframes already exist.
+    :param name: Split name (e.g. train, test)
     :return: Tuple of dataframes for train, validation, and test sets.
     """
-    dataframes = []
-    names = ['train', 'test']
     weights = None
 
-    print('Creating dataframes for training and testing.')
+    print(f'Creating dataframe for {name}ing.')
 
-    for paths, name in zip(paths, names):
-        proc_path = get_path('..', 'data', 'proc', filename=f'{name}.csv')
+    proc_path = get_path('..', 'data', 'proc', filename=f'{name}.csv')
 
-        if exist:
-            df = pd.read_csv(proc_path)
-            print(f'Loaded existing dataframe from {proc_path}.')
-        else:
-            df = combine_data(paths, seq_len)
+    if exist:
+        # df = pd.read_csv(proc_path)
+        df = pd.read_json(proc_path)
+        print(f'Loaded existing dataframe from {proc_path}.')
+    else:
+        df = combine_data(path, seq_len)
 
-            if name == 'train':
-                print('Calculating class weights from the training dataframe.')
+        # Convert integer columns to smallest possible type
+        for col in df.select_dtypes(include='int').columns:
+            df[col] = pd.to_numeric(df[col], downcast='integer')
 
-                weights, _ = extract_weights(df, label_col='majority')
+        # Convert float columns to smallest possible type
+        for col in df.select_dtypes(include='float').columns:
+            df[col] = pd.to_numeric(df[col], downcast='float')
 
-            label_mapping = get_label_mapping(weights=weights)
-            df['majority'] = df['majority'].map(label_mapping)
+        df = df.groupby(['seq_id', 'night']).agg(list).reset_index()
 
-            df.to_csv(proc_path, index=False)
-            print(f'Saved {name} dataframe to {proc_path}.')
+        def most_common(lst):
+            return Counter(lst).most_common(1)[0][0]
 
-        dataframes.append(df)
+        df['majority_class'] = df['majority'].apply(most_common).astype(int)
 
-    print('Dataframes for training, and testing are ready!')
+        df = df.drop(['seq_id', 'night', 'majority'], axis=1)
 
-    return tuple(dataframes)
+        # df.to_csv(proc_path, index=False)
+        df.to_json(proc_path, orient='records')
+        print(f'Saved {name} dataframe to {proc_path}.')
+
+    print(f'Dataframes for {name}ing are ready!')
+
+    return df
+
 
 def extract_weights(df, label_col):
     """
@@ -304,138 +222,28 @@ def extract_weights(df, label_col):
 
     return weights, new_weights
 
-def get_label_mapping(weights):
-    label_mapping = {original_label: new_index for new_index, original_label in enumerate(weights.keys())}
 
-    return label_mapping
-
-def create_datasets(dataframes, seq_len=7680):
+def create_df(df):
     """
-    Create datasets for the specified dataframes (e.g. training, and testing).
-
-    :param dataframes: Tuple of dataframes.
-    :param seq_len: Sequence length for each dataset sample.
-    :return: Tuple of datasets.
+    Create dataset for the specified dataframes (e.g. training, testing).
+    :param df: Dataframe.
+    :return: Dataset.
     """
-    datasets = []
-
-    X = ['HB_1', 'HB_2']
-    t = ['time', 'seq_id', 'night']
-    y = ['majority']
-
-    print('Creating datasets from dataframes.') 
-
-    for df in dataframes:
-        dataset = TSDataset(df, seq_len, X, t, y)
-        datasets.append(dataset)
-
-    print(f'Datasets created successfully!')
-
-    return tuple(datasets)
-
-
-def create_dfs(dataframes):
-    """
-    Create datasets for the specified dataframes (e.g. training, and testing).
-
-    :param dataframes: Tuple of dataframes.
-    :param seq_len: Sequence length for each dataset sample.
-    :return: Tuple of datasets.
-    """
-    datasets = []
 
     X = ['HB_1', 'HB_2']
     y = ['majority_class']
 
-    def most_common(lst):
-        return Counter(lst).most_common(1)[0][0]
+    X_train, y_train = df[X], df[y]
 
-    print('Creating datasets from dataframes.')
+    '''
+    X_train['HB_1'] = X_train['HB_1'].apply(lambda x: np.array(ast.literal_eval(x)))
+    X_train['HB_2'] = X_train['HB_2'].apply(lambda x: np.array(ast.literal_eval(x)))
+    '''
+    X_train, y_train = X_train.to_numpy(), y_train.to_numpy()
 
-    for df in dataframes:
-        df = df.drop(columns=['time'])
-        df = df.groupby(['seq_id', 'night']).agg(list).reset_index()
-        df['majority_class'] = df['majority'].apply(most_common)
+    X_train = np.stack([np.stack(row) for row in X_train])
+    y_train = np.stack([np.stack(row) for row in y_train])
 
-        datasets.append((df[X], df[y]))
+    print(f'Dataset created successfully!')
 
-        def length(lst):
-            return len(lst)
-
-        df['HB_1_len'] = df['HB_1'].apply(length)
-        df['HB_2_len'] = df['HB_2'].apply(length)
-
-    print(f'Datasets created successfully!')
-
-    return tuple(datasets)
-
-
-def create_dataloaders(datasets, batch_size=1, shuffle=[True, False, False], num_workers=None, drop_last=False):
-    """
-    Create DataLoader objects for the specified datasets, providing data in batches for training and testing.
-
-    :param datasets: Tuple of datasets.
-    :param batch_size: Batch size for the DataLoader.
-    :param shuffle: List indicating whether to shuffle data for each dataset.
-    :param num_workers: Number of subprocesses to use for data loading (default is all available CPU cores).
-    :param drop_last: Whether to drop the last incomplete batch.
-    :return: Tuple of DataLoader objects.
-    """
-    dataloaders = []
-    cpu_cores = multiprocessing.cpu_count()
-
-    if num_workers is None:
-        num_workers = cpu_cores
-
-    print(f'System has {cpu_cores} CPU cores. Using {num_workers}/{cpu_cores} workers for data loading.')
-    
-    for dataset, shuffle in zip(datasets, shuffle):
-        full_batches = dataset.num_seqs // batch_size
-
-        dataloader = DataLoader(
-            dataset=dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            drop_last=drop_last
-        )
-        dataloaders.append(dataloader)
-
-        print(f'Total batches={len(dataloader)} & full batches={full_batches}, with each full batch containing {batch_size} sequences.')
-    
-    print('DataLoaders created successfully.')
-
-    return tuple(dataloaders)
-
-def separate(src, c, t):
-    """
-    Separates channels and time features from the source tensor.
-
-    :param src: Tensor of shape (batch_size, seq_len, num_feats).
-    :param c: Range of channel features.
-    :param t: Range of time features.
-    :return: Tuple of (channels, time) tensors.
-    """
-    channels = src[:, :, c]
-    time = src[:, :, t]
-
-    return channels, time
-
-def aggregate_seqs(data):
-    """
-    Aggregates the tensor by reducing the sequence length to a single time step.
-
-    :param data: Tensor of shape (batch_size, seq_len, num_feats).
-    :return: Tensor of shape (batch_size, 1, num_feats).
-    """
-    return data[:, 0:1, :]
-
-def merge(c, t):
-    """
-    Concatenates channel and time feature tensors along the feature dimension.
-
-    :param c: Tensor of shape (batch_size, seq_len, num_channels_feats).
-    :param t: Tensor of shape (batch_size, seq_len, num_time_feats).
-    :return: Tensor of shape (batch_size, seq_len, num_channels_feats + num_time_feats).
-    """
-    return torch.cat((c, t), dim=2)
+    return X_train, y_train

@@ -1,6 +1,9 @@
 import os
+import time
 BACKEND = 'jax' # You can use any backend here
 os.environ['KERAS_BACKEND'] = BACKEND
+
+import jax.numpy as jnp
 
 import numpy as np
 
@@ -8,25 +11,25 @@ import keras
 from keras.models import Sequential
 from keras.layers import Dense, Input
 
-from sklearn.metrics import r2_score
-from sklearn.metrics import root_mean_squared_error
+from sklearn.metrics import f1_score
 
-from tkan import TKAN, get_dataframes, create_dfs, get_boas_data, split_data, extract_weights, get_dir
+from tkan import TKAN, get_dataframe, create_df, get_boas_data, split_data, extract_weights, get_dir
 
-import time
 
 keras.utils.set_random_seed(1)
 
-N_MAX_EPOCHS = 2
+N_MAX_EPOCHS = 1
 BATCH_SIZE = 128
+
 early_stopping_callback = lambda: keras.callbacks.EarlyStopping(
     monitor="val_loss",
     min_delta=0.00001,
     patience=10,
     mode="min",
     restore_best_weights=True,
-    start_from_epoch=6,
+    start_from_epoch=5,
 )
+
 lr_callback = lambda: keras.callbacks.ReduceLROnPlateau(
     monitor="val_loss",
     factor=0.25,
@@ -44,7 +47,7 @@ results = []
 results_rmse = []
 time_results = []
 
-samples, chunks = 7680, 32
+samples, chunks = 7680, 1
 seq_len = samples // chunks
 
 bitbrain_dir = get_dir('..', 'data')
@@ -52,48 +55,55 @@ raw_dir = get_dir('..', 'data', 'raw')
 
 get_boas_data(base_path=bitbrain_dir, output_path=raw_dir)
 
-datapaths = split_data(dir=raw_dir, train_size=43, test_size=13)
+datapaths = split_data(dir=raw_dir, train_size=1, test_size=1)
+# datapaths = split_data(dir=raw_dir, train_size=46, test_size=5)
 
-train_df, test_df = get_dataframes(datapaths, seq_len=seq_len, exist=True)
-_, weights = extract_weights(train_df, label_col='majority')
+train_path, test_path = datapaths[0], datapaths[1]
+
+exist = True
+train_df = get_dataframe(train_path, name="train", seq_len=seq_len, exist=exist)
+
+global weights
+_, weights = extract_weights(train_df, label_col='majority_class')
 
 classes = list(weights.keys())
 
-datasets = create_dfs(dataframes=(train_df, test_df))
+print(list(weights.values()))
+weights = jnp.array(list(weights.values()))
 
-X_train, y_train = datasets[0]
-X_test, y_test = datasets[1]
+X_train, y_train = create_df(df=train_df)
 
-# Find the maximum length of lists in the entire DataFrame
-max_length = X_train.applymap(len).max().max()
-
-# Define a function to pad each list with zeros to match max_length
-def pad_list(lst):
-    return np.pad(lst, (0, max_length - len(lst)), 'constant')
-
-# Apply padding to each list in the DataFrame
-for col in X_train.columns:
-    X_train[col] = X_train[col].apply(pad_list)
-    X_test[col] = X_test[col].apply(pad_list)
-
-# Convert the entire DataFrame to a NumPy array
-X_train, X_test = X_train.to_numpy(), X_test.to_numpy()
-y_train, y_test = y_train.to_numpy(), y_test.to_numpy()
-
-X_train = np.stack([np.stack(row) for row in X_train])
-X_test = np.stack([np.stack(row) for row in X_test])
-y_train = np.stack([np.stack(row) for row in y_train])
-y_test = np.stack([np.stack(row) for row in y_test])
+n_classes = len(classes)
 
 model = Sequential([
     Input(shape=X_train.shape[1:]),
-    TKAN(10, return_sequences=True),
-    TKAN(10, sub_kan_output_dim=20, sub_kan_input_dim=20, return_sequences=False),
-    Dense(units=1, activation='linear')
+    TKAN(2, return_sequences=True),
+    TKAN(2, sub_kan_output_dim=5, sub_kan_input_dim=5, return_sequences=False),
+    Dense(units=n_classes, activation='softmax')
 ], name='TKAN')
 
+
+def weighted_categorical_crossentropy(class_weights):
+    def loss(y_true, y_pred):
+        # Clip y_pred to avoid log(0) errors
+        y_pred = jnp.clip(y_pred, 1e-7, 1 - 1e-7)
+
+        # Calculate categorical cross-entropy loss
+        cce = -jnp.sum(y_true * jnp.log(y_pred), axis=-1)
+
+        # Get the weights for each class
+        weights = jnp.sum(y_true * class_weights, axis=-1)  # Weight each sample by true class
+
+        # Calculate the weighted loss for each sample
+        weighted_loss = cce * weights
+        return jnp.mean(weighted_loss)  # Return the mean weighted loss
+
+    return loss
+
+
 optimizer = keras.optimizers.Adam(0.001)
-model.compile(optimizer=optimizer, loss='mean_squared_error', jit_compile=True)
+# model.compile(optimizer=optimizer, loss=weighted_categorical_crossentropy(class_weights=weights), jit_compile=True)
+model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', jit_compile=True, metrics=['categorical_accuracy'])
 model.summary()
 
 # Fit the model
@@ -103,24 +113,25 @@ history = model.fit(X_train, y_train, batch_size=BATCH_SIZE, epochs=N_MAX_EPOCHS
 end_time = time.time()
 time_results.append(end_time - start_time)
 
+# Begin Evaluation
+test_df = get_dataframe(test_path, name="test", seq_len=seq_len, exist=False)
+X_test, y_test = create_df(df=test_df)
+
 # Evaluate the model on the test set
-preds = model.predict(X_test, verbose=False)
-r2 = r2_score(y_true=y_test, y_pred=preds)
-print(end_time - start_time, r2)
-rmse = root_mean_squared_error(y_true=y_test, y_pred=preds)
-results.append(r2)
-results_rmse.append(rmse)
+y_pred = model.predict(X_test, verbose=False)
+print(f'Training time {end_time - start_time}')
 
 del model
 del optimizer
 
-print('R2 scores')
-print('Means:')
-print(np.mean(results))
-print(np.mean(results_rmse))
-print('Std:')
-print(np.std(results))
-print(np.std(results_rmse))
-print('Training Times')
-print(np.mean(time_results))
-print(np.std(time_results))
+y_pred = np.argmax(y_pred, axis=1)
+
+f1_macro = f1_score(y_test, y_pred, average='macro')
+f1_micro = f1_score(y_test, y_pred, average='micro')
+f1_weighted = f1_score(y_test, y_pred, average='weighted')
+f1_per_class = f1_score(y_test, y_pred, average=None)  # F1 score for each class
+
+print(f"Macro F1 Score: {f1_macro}")
+print(f"Micro F1 Score: {f1_micro}")
+print(f"Weighted F1 Score: {f1_weighted}")
+print(f"F1 Score per class: {f1_per_class}")
