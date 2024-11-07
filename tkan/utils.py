@@ -28,6 +28,7 @@ def get_stats(df):
 
     return stats
 
+
 def save_json(data, filename):
     """
     Save data to a JSON file.
@@ -37,6 +38,19 @@ def save_json(data, filename):
     """
     with open(filename, 'w') as f:
         json.dump(data, f)
+
+
+def load_json(filename):
+    """
+    Load data from a JSON file.
+    :param filename: str
+    :return: dictionary
+    """
+    with open(filename, 'r') as f:
+        data = json.load(f)
+
+    return data
+
 
 def robust_normalize(df, exclude, path):
     """

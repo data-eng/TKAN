@@ -1,24 +1,22 @@
 import os
 import time
+
 BACKEND = 'jax' # You can use any backend here
 os.environ['KERAS_BACKEND'] = BACKEND
 
 import jax.numpy as jnp
 
-import numpy as np
-
 import keras
-from keras.models import Sequential
+from keras.models import Sequential, load_model
 from keras.layers import Dense, Input
 
-from sklearn.metrics import f1_score
 
 from tkan import TKAN, get_dataframe, create_df, get_boas_data, split_data, extract_weights, get_dir
 
 
 keras.utils.set_random_seed(1)
 
-N_MAX_EPOCHS = 1
+N_MAX_EPOCHS = 1 #30
 BATCH_SIZE = 128
 
 early_stopping_callback = lambda: keras.callbacks.EarlyStopping(
@@ -43,10 +41,6 @@ lr_callback = lambda: keras.callbacks.ReduceLROnPlateau(
 callbacks = lambda: [early_stopping_callback(), lr_callback(), keras.callbacks.TerminateOnNaN()]
 
 
-results = []
-results_rmse = []
-time_results = []
-
 samples, chunks = 7680, 1
 seq_len = samples // chunks
 
@@ -63,7 +57,6 @@ train_path, test_path = datapaths[0], datapaths[1]
 exist = True
 train_df = get_dataframe(train_path, name="train", seq_len=seq_len, exist=exist)
 
-global weights
 _, weights = extract_weights(train_df, label_col='majority_class')
 
 classes = list(weights.keys())
@@ -111,27 +104,10 @@ start_time = time.time()
 history = model.fit(X_train, y_train, batch_size=BATCH_SIZE, epochs=N_MAX_EPOCHS, validation_split=0.2,
                     callbacks=callbacks(), shuffle=True, verbose=False)
 end_time = time.time()
-time_results.append(end_time - start_time)
 
-# Begin Evaluation
-test_df = get_dataframe(test_path, name="test", seq_len=seq_len, exist=False)
-X_test, y_test = create_df(df=test_df)
-
-# Evaluate the model on the test set
-y_pred = model.predict(X_test, verbose=False)
+model.save('tkan_model.keras')
+    
 print(f'Training time {end_time - start_time}')
 
-del model
 del optimizer
-
-y_pred = np.argmax(y_pred, axis=1)
-
-f1_macro = f1_score(y_test, y_pred, average='macro')
-f1_micro = f1_score(y_test, y_pred, average='micro')
-f1_weighted = f1_score(y_test, y_pred, average='weighted')
-f1_per_class = f1_score(y_test, y_pred, average=None)  # F1 score for each class
-
-print(f"Macro F1 Score: {f1_macro}")
-print(f"Micro F1 Score: {f1_micro}")
-print(f"Weighted F1 Score: {f1_weighted}")
-print(f"F1 Score per class: {f1_per_class}")
+del model
