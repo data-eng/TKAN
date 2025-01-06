@@ -193,7 +193,7 @@ def get_dataframe(path, seq_len, name, exist):
         df.to_json(proc_path, orient='records')
         print(f'Saved {name} dataframe to {proc_path}.')
 
-    print(f'Dataframes for {name}ing are ready!')
+    print(f'Dataframes for {name}ing is ready!')
 
     return df
 

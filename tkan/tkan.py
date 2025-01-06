@@ -9,6 +9,12 @@ from keras import initializers
 from keras import regularizers
 from keras.layers import InputSpec, Layer, RNN, Dense
 
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+import sympy
+from sympy.printing import latex
+
 # Assume KANLinear is defined elsewhere in a backend-agnostic manner
 from keras_efficient_kan import KANLinear
 
@@ -139,6 +145,9 @@ class TKANCell(Layer):
         self.state_size = [units, units] + [1 for _ in self.sub_kan_configs]
         self.output_size = units
         self.backend = get_backend()
+
+        self.save_io = {'kan_linear_2_i': [], 'kan_linear_3_i': [],
+                        'kan_linear_2_o': [], 'kan_linear_3_o': []}
     
 
     def build(self, input_shape):
@@ -339,10 +348,18 @@ class TKANCell(Layer):
         sub_outputs = []
         new_sub_states = []
 
+
         for idx, (sub_layer, sub_state) in enumerate(zip(self.tkan_sub_layers, sub_states)):
+            layer_name = sub_layer.name
             sub_kernel_x, sub_kernel_h = self.sub_tkan_recurrent_kernel_inputs[idx], self.sub_tkan_recurrent_kernel_states[idx]
             agg_input = inputs @ sub_kernel_x + sub_state @ sub_kernel_h
+
+            self.save_io[f'{layer_name}_i'].append(agg_input)
+
             sub_output = sub_layer(agg_input)
+
+            self.save_io[f'{layer_name}_o'].append(sub_output)
+
             sub_recurrent_kernel_h, sub_recurrent_kernel_x = ops.split(self.sub_tkan_kernel[idx], 2, axis=0)
             new_sub_state = sub_recurrent_kernel_h * sub_output + sub_state * sub_recurrent_kernel_x
 

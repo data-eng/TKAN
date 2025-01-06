@@ -1,54 +1,3 @@
-import os
-BACKEND = 'jax' # You can use any backend here
-os.environ['KERAS_BACKEND'] = BACKEND
-
-import numpy as np
-import pandas as pd
-
-import keras
-from keras.models import Sequential
-from keras.layers import Dense, Input
-
-from sklearn.metrics import r2_score
-from sklearn.metrics import root_mean_squared_error
-
-from tkan import TKAN
-
-import time
-
-keras.utils.set_random_seed(1)
-
-N_MAX_EPOCHS = 2
-BATCH_SIZE = 128
-early_stopping_callback = lambda: keras.callbacks.EarlyStopping(
-    monitor="val_loss",
-    min_delta=0.00001,
-    patience=10,
-    mode="min",
-    restore_best_weights=True,
-    start_from_epoch=6,
-)
-lr_callback = lambda: keras.callbacks.ReduceLROnPlateau(
-    monitor="val_loss",
-    factor=0.25,
-    patience=5,
-    mode="min",
-    min_delta=0.00001,
-    min_lr=0.000025,
-    verbose=0,
-)
-
-callbacks = lambda: [early_stopping_callback(), lr_callback(), keras.callbacks.TerminateOnNaN()]
-
-
-df = pd.read_parquet('data.parquet')
-df = df[(df.index >= pd.Timestamp('2020-01-01')) & (df.index < pd.Timestamp('2023-01-01'))]
-assets = ['BTC', 'ETH', 'ADA', 'XMR', 'EOS', 'MATIC', 'TRX', 'FTM', 'BNB', 'XLM', 'ENJ', 'CHZ', 'BUSD', 'ATOM', 'LINK', 'ETC', 'XRP', 'BCH', 'LTC']
-df = df[[c for c in df.columns if 'quote asset volume' in c and any(asset in c for asset in assets)]]
-df.columns = [c.replace(' quote asset volume', '') for c in df.columns]
-print(df)
-
-
 class MinMaxScaler:
     def __init__(self, feature_axis=None, minmax_range=(0, 1)):
         """
@@ -65,6 +14,7 @@ class MinMaxScaler:
         self.minmax_range = minmax_range  # Default range for scaling (min, max)
 
     def fit(self, X):
+        import numpy as np
         """
         Fit the scaler to the data based on its dimensionality.
         Args:
@@ -122,6 +72,9 @@ class MinMaxScaler:
 
 
 def generate_data(df, sequence_length, n_ahead=1):
+
+    import numpy as np
+
     # Case without known inputs
     scaler_df = df.copy().shift(n_ahead).rolling(24 * 14).median()
     tmp_df = df.copy() / scaler_df
@@ -165,55 +118,112 @@ def generate_data(df, sequence_length, n_ahead=1):
     y_test = y_test.reshape(y_test.shape[0], -1)
     return X_scaler, X_train, X_test, X_train_unscaled, X_test_unscaled, y_scaler, y_train, y_test, y_train_unscaled, y_test_unscaled, y_scaler_train, y_scaler_test
 
+import os
+BACKEND = 'torch'  # You can use any backend here
+os.environ['KERAS_BACKEND'] = BACKEND
 
-n_aheads = [1] #, 3, 6, 9, 12, 15]
+import numpy as np
+import pandas as pd
 
-results = {n_ahead: [] for n_ahead in n_aheads}
-results_rmse = {n_ahead: [] for n_ahead in n_aheads}
-time_results = {n_ahead: [] for n_ahead in n_aheads}
-for n_ahead in n_aheads:
-    sequence_length = max(45, 5 * n_ahead)
-    X_scaler, X_train, X_test, X_train_unscaled, X_test_unscaled, y_scaler, y_train, y_test, y_train_unscaled, y_test_unscaled, y_scaler_train, y_scaler_test = generate_data(
-        df, sequence_length, n_ahead)
+import keras
+from keras.models import Sequential, Model
+from keras.layers import Dense, Input
 
-    for run in range(1):
+from sklearn.metrics import r2_score
+from sklearn.metrics import root_mean_squared_error
 
-        model = Sequential([
-            Input(shape=X_train.shape[1:]),
-            TKAN(100, return_sequences=True),
-            TKAN(100, sub_kan_output_dim=20, sub_kan_input_dim=20, return_sequences=False),
-            Dense(units=n_ahead, activation='linear')
-        ], name='TKAN')
+from tkan import TKAN
 
-        optimizer = keras.optimizers.Adam(0.001)
-        model.compile(optimizer=optimizer, loss='mean_squared_error', jit_compile=True)
-        if run == 0:
-            model.summary()
+import time
 
-        # Fit the model
-        start_time = time.time()
-        history = model.fit(X_train, y_train, batch_size=BATCH_SIZE, epochs=N_MAX_EPOCHS, validation_split=0.2,
-                            callbacks=callbacks(), shuffle=True, verbose=False)
-        end_time = time.time()
-        time_results[n_ahead].append(end_time - start_time)
-        # Evaluate the model on the test set
-        preds = model.predict(X_test, verbose=False)
-        r2 = r2_score(y_true=y_test, y_pred=preds)
-        print(end_time - start_time, r2)
-        rmse = root_mean_squared_error(y_true=y_test, y_pred=preds)
-        results[n_ahead].append(r2)
-        results_rmse[n_ahead].append(rmse)
+keras.utils.set_random_seed(1)
 
-        del model
-        del optimizer
+N_MAX_EPOCHS = 1000
+BATCH_SIZE = 128
+early_stopping_callback = lambda: keras.callbacks.EarlyStopping(
+    monitor="val_loss",
+    min_delta=0.00001,
+    patience=10,
+    mode="min",
+    restore_best_weights=True,
+    start_from_epoch=6,
+)
+lr_callback = lambda: keras.callbacks.ReduceLROnPlateau(
+    monitor="val_loss",
+    factor=0.25,
+    patience=5,
+    mode="min",
+    min_delta=0.00001,
+    min_lr=0.000025,
+    verbose=0,
+)
 
-print('R2 scores')
-print('Means:')
-print({n_ahead: np.mean(results[n_ahead]) for n_ahead in n_aheads})
-print({n_ahead: np.mean(results_rmse[n_ahead]) for n_ahead in n_aheads})
-print('Std:')
-print({n_ahead: np.std(results[n_ahead]) for n_ahead in n_aheads})
-print({n_ahead: np.std(results_rmse[n_ahead]) for n_ahead in n_aheads})
-print('Training Times')
-print({n_ahead: np.mean(time_results[n_ahead]) for n_ahead in n_aheads})
-print({n_ahead: np.std(time_results[n_ahead]) for n_ahead in n_aheads})
+callbacks = lambda: [early_stopping_callback(), lr_callback(), keras.callbacks.TerminateOnNaN()]
+
+
+def train():
+
+    df = pd.read_parquet('data.parquet')
+    df = df[(df.index >= pd.Timestamp('2020-01-01')) & (df.index < pd.Timestamp('2023-01-01'))]
+    assets = ['BTC', 'ETH', 'ADA', 'XMR', 'EOS', 'MATIC', 'TRX', 'FTM', 'BNB', 'XLM', 'ENJ', 'CHZ', 'BUSD', 'ATOM', 'LINK', 'ETC', 'XRP', 'BCH', 'LTC']
+    df = df[[c for c in df.columns if 'quote asset volume' in c and any(asset in c for asset in assets)]]
+    df.columns = [c.replace(' quote asset volume', '') for c in df.columns]
+
+    n_aheads = [1] #, 3, 6, 9, 12, 15]
+
+    results = {n_ahead: [] for n_ahead in n_aheads}
+    results_rmse = {n_ahead: [] for n_ahead in n_aheads}
+    time_results = {n_ahead: [] for n_ahead in n_aheads}
+    for n_ahead in n_aheads:
+        sequence_length = max(45, 5 * n_ahead)
+        X_scaler, X_train, X_test, X_train_unscaled, X_test_unscaled, y_scaler, y_train, y_test, y_train_unscaled, y_test_unscaled, y_scaler_train, y_scaler_test = generate_data(
+            df, sequence_length, n_ahead)
+
+        for run in range(1):
+
+            model = Sequential([
+                Input(shape=X_train.shape[1:]),
+                TKAN(100, return_sequences=True),
+                TKAN(100, sub_kan_output_dim=20, sub_kan_input_dim=20, return_sequences=False),
+                Dense(units=n_ahead, activation='linear')
+            ], name='TKAN')
+
+            optimizer = keras.optimizers.Adam(0.001)
+            model.compile(optimizer=optimizer, loss='mean_squared_error') #, jit_compile=True)
+            if run == 0:
+                model.summary()
+
+            # Fit the model
+            start_time = time.time()
+
+            model.fit(X_train, y_train, batch_size=BATCH_SIZE, epochs=N_MAX_EPOCHS, validation_split=0.2,
+                      callbacks=callbacks(), shuffle=True, verbose=False)
+
+            end_time = time.time()
+
+            model.save('./tkan_model.keras')
+
+            time_results[n_ahead].append(end_time - start_time)
+            # Evaluate the model on the test set
+            preds = model.predict(X_test, verbose=False)
+            r2 = r2_score(y_true=y_test, y_pred=preds)
+            print(end_time - start_time, r2)
+            rmse = root_mean_squared_error(y_true=y_test, y_pred=preds)
+            results[n_ahead].append(r2)
+            results_rmse[n_ahead].append(rmse)
+
+            del model
+            del optimizer
+
+    print('R2 scores')
+    print('Means:')
+    print({n_ahead: np.mean(results[n_ahead]) for n_ahead in n_aheads})
+    print({n_ahead: np.mean(results_rmse[n_ahead]) for n_ahead in n_aheads})
+    print('Std:')
+    print({n_ahead: np.std(results[n_ahead]) for n_ahead in n_aheads})
+    print({n_ahead: np.std(results_rmse[n_ahead]) for n_ahead in n_aheads})
+    print('Training Times')
+    print({n_ahead: np.mean(time_results[n_ahead]) for n_ahead in n_aheads})
+    print({n_ahead: np.std(time_results[n_ahead]) for n_ahead in n_aheads})
+
+# train()
