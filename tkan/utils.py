@@ -1,5 +1,6 @@
 import os
 import json
+import pandas as pd
 
 
 def get_stats(df):
@@ -75,7 +76,7 @@ def robust_normalize(df, exclude, path):
 
     return newdf
 
-def get_path(*dirs, filename):
+def get_path(*dirs, filename=""):
     """
     Construct a full file path by combining directory paths and a filename.
 
@@ -103,3 +104,7 @@ def get_dir(*sub_dirs):
         os.makedirs(dir)
 
     return dir
+
+def save_csv(data, filename):
+    df = pd.DataFrame(data)
+    df.to_csv(filename, index=False)
